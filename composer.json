@@ -38,6 +38,10 @@
         "jetbrains/phpstorm-stubs": "^2019.3",
         "psalm/phar": "6.16.*"
     },
+    "suggest": {
+        "symfony/polyfill-io-poll": "To use IoPollDriver on PHP < 8.6, together with symfony/polyfill-time",
+        "symfony/polyfill-time": "To use IoPollDriver on PHP < 8.6, together with symfony/polyfill-io-poll"
+    },
     "autoload": {
         "psr-4": {
             "Revolt\\": "src"
