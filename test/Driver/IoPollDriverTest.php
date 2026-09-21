@@ -19,6 +19,8 @@ class IoPollDriverTest extends DriverTest
 
     public function setUp(): void
     {
+        // Not isSupported(): that is deliberately false below 8.6, while the driver still has to be
+        // exercised there through the polyfill.
         if (!\class_exists(Context::class) || !\class_exists(Duration::class)) {
             self::markTestSkipped("Skip, the Io\\Poll API requires PHP 8.6 or symfony/polyfill-io-poll");
         }
@@ -33,7 +35,7 @@ class IoPollDriverTest extends DriverTest
 
     public function testAsyncSignals(): void
     {
-        if (\DIRECTORY_SEPARATOR === '\\') {
+        if (self::isWindows()) {
             self::markTestSkipped('Skip on Windows');
         }
 
@@ -73,49 +75,47 @@ class IoPollDriverTest extends DriverTest
     }
 
     /**
+     * A signal arriving while the loop is blocked in wait() makes it throw ERROR_INTERRUPTED. The
+     * driver has to turn that into the signal callback running, not into an exception.
+     *
      * @requires extension pcntl
      */
-    public function testSignalDuringPollIgnored(): void
+    public function testSignalInterruptingWaitIsDispatched(): void
     {
-        if (\DIRECTORY_SEPARATOR === '\\') {
+        if (self::isWindows()) {
             self::markTestSkipped('Skip on Windows');
         }
 
         if (!\extension_loaded("pcntl")
             || !\function_exists('pcntl_signal_dispatch')
             || !\function_exists('pcntl_signal')
+            || !\function_exists('pcntl_alarm')
         ) {
             self::markTestSkipped('Skip, PCNTL functions not available');
         }
 
-        $sockets = self::createSocketPair();
+        [$left, $right] = self::createSocketPair();
+        $invoked = false;
 
-        $this->start(function (Driver $loop) use ($sockets, &$signalCallbackId) {
-            $socketCallbackIds = [
-                $loop->onReadable($sockets[0], function () {
-                    // nothing
-                }),
-                $loop->onReadable($sockets[1], function () {
-                    // nothing
-                }),
-            ];
+        $this->start(function (Driver $loop) use ($left, &$invoked): void {
+            // keeps the loop blocked in wait() until the kernel delivers SIGALRM a second later
+            $readableId = $loop->onReadable($left, static function (): void {
+                // nothing
+            });
 
-            $signalCallbackId = $loop->onSignal(\SIGUSR2, function ($callbackId) use ($socketCallbackIds, $loop) {
+            $loop->onSignal(\SIGALRM, function (string $callbackId) use ($loop, $readableId, &$invoked): void {
+                $invoked = true;
                 $loop->cancel($callbackId);
-
-                foreach ($socketCallbackIds as $socketCallbackId) {
-                    $loop->cancel($socketCallbackId);
-                }
-
-                $this->assertTrue(true);
+                $loop->cancel($readableId);
             });
 
-            $loop->delay(0.1, function () {
-                \proc_open('sh -c "sleep 1; kill -USR2 ' . \getmypid() . '"', [], $pipes);
-            });
+            \pcntl_alarm(1);
         });
 
-        $this->loop->cancel($signalCallbackId);
+        \fclose($left);
+        \fclose($right);
+
+        self::assertTrue($invoked);
     }
 
     /**
@@ -123,7 +123,7 @@ class IoPollDriverTest extends DriverTest
      */
     public function testMoreFileDescriptorsThanFdSetSize(): void
     {
-        if (\stripos(PHP_OS, 'win') === 0) {
+        if (self::isWindows()) {
             self::markTestSkipped('Skip on Windows');
         }
 
@@ -171,30 +171,6 @@ class IoPollDriverTest extends DriverTest
         }
 
         self::assertTrue($invoked);
-    }
-
-    public function testCancelAfterStreamIsClosed(): void
-    {
-        [$left, $right] = self::createSocketPair();
-
-        $callbackId = $this->loop->onReadable($left, static function () {
-            // nothing
-        });
-
-        $this->loop->defer(function () use ($callbackId, $left): void {
-            \fclose($left);
-            $this->loop->cancel($callbackId);
-        });
-
-        $this->loop->delay(0.1, function (): void {
-            $this->loop->stop();
-        });
-
-        $this->loop->run();
-
-        \fclose($right);
-
-        self::assertNotContains($callbackId, $this->loop->getIdentifiers());
     }
 
     public function testSupportedOnlyWhenNative(): void

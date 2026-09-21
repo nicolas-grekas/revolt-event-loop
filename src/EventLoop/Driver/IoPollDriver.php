@@ -29,13 +29,14 @@ final class IoPollDriver extends AbstractDriver
     /**
      * Whether this driver is worth choosing over StreamSelectDriver.
      *
-     * The driver also runs on symfony/polyfill-io-poll below PHP 8.6, but that polyfill is backed by
-     * stream_select() itself, so it is slower than using stream_select() directly and is not picked
-     * automatically. Set REVOLT_DRIVER to this class to use it there anyway.
+     * The Io\Poll API ships with every PHP 8.6 build. The driver also runs on symfony/polyfill-io-poll
+     * below that, but that polyfill is backed by stream_select() itself, so it is slower than using
+     * stream_select() directly and is not picked automatically. Set REVOLT_DRIVER to this class to
+     * use it there anyway.
      */
     public static function isSupported(): bool
     {
-        return \PHP_VERSION_ID >= 80600 && \class_exists(Context::class) && \class_exists(Duration::class);
+        return \PHP_VERSION_ID >= 80600;
     }
 
     private readonly Context $context;
@@ -250,8 +251,7 @@ final class IoPollDriver extends AbstractDriver
             if ($watcher !== null) {
                 unset($this->watchers[$streamId], $this->alwaysReadyStreams[$streamId]);
 
-                // Closing a stream already takes its descriptor out of the context, and removing the
-                // watcher of a closed stream crashes PHP before php/php-src#23791
+                // Removing the watcher of a closed stream crashes 8.6 builds before php/php-src#23791
                 if (\is_resource($stream)) {
                     $watcher->remove();
                 }
@@ -277,7 +277,7 @@ final class IoPollDriver extends AbstractDriver
                 try {
                     $this->watchers[$streamId] = $this->alwaysReadyContext->add($handle, $events, $streamId);
                 } catch (PollException) {
-                    throw $exception;
+                    throw $exception; // the refusal of the preferred backend is the one worth reporting
                 }
 
                 $this->alwaysReadyStreams[$streamId] = true;
@@ -290,10 +290,10 @@ final class IoPollDriver extends AbstractDriver
         }
     }
 
-    private function poll(float $timeout): void
+    private function poll(?float $timeout): void
     {
         if (!$this->watchers) {
-            if ($timeout < 0) { // Only signal callbacks are enabled, so sleep indefinitely.
+            if ($timeout === null) { // Only signal callbacks are enabled, so sleep indefinitely.
                 /** @psalm-suppress ArgumentTypeCoercion */
                 \usleep(\PHP_INT_MAX);
                 return;
@@ -312,7 +312,7 @@ final class IoPollDriver extends AbstractDriver
             $timeout = 0.0;
         }
 
-        if ($timeout < 0) {
+        if ($timeout === null) {
             $duration = null;
         } else {
             $seconds = (int) $timeout;
@@ -334,6 +334,7 @@ final class IoPollDriver extends AbstractDriver
         }
 
         foreach ($watchers as $watcher) {
+            /** @var int $streamId */
             $streamId = $watcher->getData();
 
             // Error and HangUp are reported whether they were requested or not. Both sides have to be
@@ -355,14 +356,14 @@ final class IoPollDriver extends AbstractDriver
     }
 
     /**
-     * @return float Seconds until next timer expires or -1 if there are no pending timers.
+     * @return float|null Seconds until next timer expires or null if there are no pending timers.
      */
-    private function getTimeout(): float
+    private function getTimeout(): ?float
     {
         $expiration = $this->timerQueue->peek();
 
         if ($expiration === null) {
-            return -1;
+            return null;
         }
 
         $expiration -= $this->now();
